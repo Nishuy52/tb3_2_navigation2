@@ -5,12 +5,12 @@ amcl:
     alpha3: 0.2
     alpha4: 0.2
     alpha5: 0.2
-    base_frame_id: "tb3_2/base_footprint"
+    base_frame_id: "tb3_1/base_footprint"
     beam_skip_distance: 0.5
     beam_skip_error_threshold: 0.9
     beam_skip_threshold: 0.3
     do_beamskip: false
-    global_frame_id: "tb3_2/map"
+    global_frame_id: "tb3_1/map"
     lambda_short: 0.1
     laser_likelihood_max_dist: 2.0
     laser_max_range: 100.0
@@ -19,7 +19,7 @@ amcl:
     max_beams: 60
     max_particles: 2000
     min_particles: 500
-    odom_frame_id: "tb3_2/odom"
+    odom_frame_id: "tb3_1/odom"
     pf_err: 0.05
     pf_z: 0.99
     recovery_alpha_fast: 0.0
@@ -36,8 +36,8 @@ amcl:
     z_max: 0.05
     z_rand: 0.5
     z_short: 0.05
-    scan_topic: /tb3_2/scan
-    map_topic: /tb3_2/map
+    scan_topic: /tb3_1/scan
+    map_topic: /tb3_1/map
     set_initial_pose: false
     always_reset_initial_pose: false
     first_map_only: false
@@ -49,8 +49,8 @@ amcl:
 
 bt_navigator:
   ros__parameters:
-    global_frame: tb3_2/map
-    robot_base_frame: tb3_2/base_link
+    global_frame: tb3_1/map
+    robot_base_frame: tb3_1/base_link
     transform_tolerance: 0.5
     filter_duration: 0.3
     default_nav_to_pose_bt_xml: "$(find-pkg-share nav2_bt_navigator)/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml" # behavior trees location.
@@ -86,15 +86,15 @@ docking_server:
     docks: ['home_dock','flex_dock1', 'flex_dock2']
     home_dock:
       type: 'nova_carter_dock'
-      frame: tb3_2/map
+      frame: tb3_1/map
       pose: [0.0, 0.0, 0.0]
     flex_dock1:
       type: 'nova_carter_dock'
-      frame: tb3_2/map
+      frame: tb3_1/map
       pose: [10.0, 10.0, 0.0]
     flex_dock2:
       type: 'nova_carter_dock'
-      frame: tb3_2/map
+      frame: tb3_1/map
       pose: [30.0, 30.0, 0.0]
     enable_stamped_cmd_vel: true
 
@@ -165,8 +165,8 @@ local_costmap:
     ros__parameters:
       update_frequency: 5.0
       publish_frequency: 2.0
-      global_frame: tb3_2/odom
-      robot_base_frame: tb3_2/base_link
+      global_frame: tb3_1/odom
+      robot_base_frame: tb3_1/base_link
       rolling_window: true
       width: 3
       height: 3
@@ -182,7 +182,7 @@ local_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: /tb3_2/scan
+          topic: /tb3_1/scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -198,7 +198,7 @@ local_costmap:
         mark_threshold: 0
         observation_sources: scan
         scan:
-          topic: /tb3_2/scan
+          topic: /tb3_1/scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -216,8 +216,8 @@ global_costmap:
     ros__parameters:
       update_frequency: 1.0
       publish_frequency: 1.0
-      global_frame: tb3_2/map
-      robot_base_frame: tb3_2/base_link
+      global_frame: tb3_1/map
+      robot_base_frame: tb3_1/base_link
       transform_tolerance: 0.5
       robot_radius: 0.1
       resolution: 0.05
@@ -228,7 +228,7 @@ global_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: /tb3_2/scan
+          topic: /tb3_1/scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -248,7 +248,7 @@ global_costmap:
         mark_threshold: 0
         observation_sources: scan
         scan:
-          topic: /tb3_2/scan
+          topic: /tb3_1/scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -290,10 +290,10 @@ planner_server:
 
 behavior_server:
   ros__parameters:
-    local_costmap_topic: /tb3_2/local_costmap/costmap_raw
-    local_footprint_topic: /tb3_2/local_costmap/published_footprint
-    global_costmap_topic: /tb3_2/global_costmap/costmap_raw
-    global_footprint_topic: /tb3_2/global_costmap/published_footprint
+    local_costmap_topic: /tb3_1/local_costmap/costmap_raw
+    local_footprint_topic: /tb3_1/local_costmap/published_footprint
+    global_costmap_topic: /tb3_1/global_costmap/costmap_raw
+    global_footprint_topic: /tb3_1/global_costmap/published_footprint
     cycle_frequency: 10.0
     behavior_plugins: ["spin", "backup", "drive_on_heading", "wait", "assisted_teleop"]
     spin:
@@ -306,9 +306,9 @@ behavior_server:
       plugin: "nav2_behaviors::Wait" # In Iron and older versions, "/" was used instead of "::"
     assisted_teleop:
       plugin: "nav2_behaviors::AssistedTeleop" # In Iron and older versions, "/" was used instead of "::"
-    local_frame: tb3_2/odom
-    global_frame: tb3_2/map
-    robot_base_frame: tb3_2/base_link
+    local_frame: tb3_1/odom
+    global_frame: tb3_1/map
+    robot_base_frame: tb3_1/base_link
     transform_timeout: 0.1
     simulate_ahead_time: 2.0
     max_rotational_vel: 1.0
@@ -328,11 +328,11 @@ waypoint_follower:
 
 collision_monitor:
   ros__parameters:
-    base_frame_id: "tb3_2/base_footprint"
-    odom_frame_id: "tb3_2/odom"
-    cmd_vel_in_topic: "/tb3_2/cmd_vel_smoothed"
-    cmd_vel_out_topic: "/tb3_2/cmd_vel"
-    state_topic: "/tb3_2/collision_monitor_state"
+    base_frame_id: "tb3_1/base_footprint"
+    odom_frame_id: "tb3_1/odom"
+    cmd_vel_in_topic: "/tb3_1/cmd_vel_smoothed"
+    cmd_vel_out_topic: "/tb3_1/cmd_vel"
+    state_topic: "/tb3_1/collision_monitor_state"
     transform_tolerance: 0.5
     source_timeout: 5.0
     base_shift_correction: true
@@ -346,7 +346,7 @@ collision_monitor:
       action_type: "stop"
       min_points: 4
       visualize: true
-      polygon_pub_topic: "/tb3_2/polygon_stop"
+      polygon_pub_topic: "/tb3_1/polygon_stop"
       enabled: true
     PolygonSlow:
       type: "polygon"
@@ -355,7 +355,7 @@ collision_monitor:
       min_points: 4
       slowdown_ratio: 0.3
       visualize: true
-      polygon_pub_topic: "/tb3_2/polygon_slowdown"
+      polygon_pub_topic: "/tb3_1/polygon_slowdown"
       enabled: true
     PolygonLimit:
       type: "polygon"
@@ -365,12 +365,12 @@ collision_monitor:
       linear_limit: 0.4
       angular_limit: 0.5
       visualize: true
-      polygon_pub_topic: "/tb3_2/polygon_limit"
+      polygon_pub_topic: "/tb3_1/polygon_limit"
       enabled: true
     FootprintApproach:
       type: "polygon"
       action_type: "approach"
-      footprint_topic: "/tb3_2/local_costmap/published_footprint"
+      footprint_topic: "/tb3_1/local_costmap/published_footprint"
       time_before_collision: 2.0
       simulation_time_step: 0.02
       min_points: 6
@@ -382,7 +382,7 @@ collision_monitor:
       min_points: 6
       visualize: true
       enabled: False
-      polygon_pub_topic: "/tb3_2/velocity_polygon_stop"
+      polygon_pub_topic: "/tb3_1/velocity_polygon_stop"
       velocity_polygons: ["rotation", "translation_forward", "translation_backward", "stopped"]
       holonomic: false
       rotation:
@@ -413,7 +413,7 @@ collision_monitor:
     scan:
       source_timeout: 0.2
       type: "scan"
-      topic: "/tb3_2/scan"
+      topic: "/tb3_1/scan"
       enabled: true
 
 velocity_smoother:
@@ -427,7 +427,7 @@ velocity_smoother:
     velocity_timeout: 1.0
     max_accel: [2.5, 0.0, 3.2]
     max_decel: [-2.5, 0.0, -3.2]
-    odom_topic: "/tb3_2/odom"
+    odom_topic: "/tb3_1/odom"
     odom_duration: 0.1
     use_realtime_priority: false
     enable_stamped_cmd_vel: true

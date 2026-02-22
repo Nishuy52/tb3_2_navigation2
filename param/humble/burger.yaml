@@ -83,8 +83,6 @@ controller_server:
       min_speed_xy: 0.0
       max_speed_xy: 0.22
       min_speed_theta: 0.0
-      # Add high threshold velocity for turtlebot 3 issue.
-      # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
       acc_lim_x: 2.5
       acc_lim_y: 0.0
       acc_lim_theta: 3.2
@@ -183,7 +181,7 @@ global_costmap:
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: base_link
-      use_sim_time: True
+      use_sim_time: False
       robot_radius: 0.1
       resolution: 0.05
       track_unknown_space: true
@@ -236,6 +234,16 @@ global_costmap:
   global_costmap_rclcpp_node:
     ros__parameters:
       use_sim_time: False
+
+# FIX: yaml_filename must be set or map_server crashes during configure with:
+#   "parameter 'yaml_filename' is not initialized"
+# The file it loads is overridden at runtime by static_layer's map_topic param
+# (set to /{ns}/map in the launch file rewriter) so this value doesn't affect
+# what the global costmap displays — slam_toolbox's live map is always used.
+map_server:
+  ros__parameters:
+    use_sim_time: False
+    yaml_filename: "map.yaml"
 
 map_saver:
   ros__parameters:

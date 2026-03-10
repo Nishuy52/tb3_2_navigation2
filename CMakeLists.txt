@@ -21,14 +21,22 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
-# Install Python scripts and mark them executable.
-# All three relay scripts must be installed here so the launch file can
-# reference them via package='tb3_1_navigation2', executable='<script>.py'
+# Install Python relay scripts and mark them executable.
+#
+# tf_relay.py    — bridges slam_toolbox's root /tf → /{ns}/tf (map→odom only).
+#                  The Pi bringup now publishes hardware TFs directly to
+#                  /{ns}/tf, so this relay handles slam_toolbox output only.
+#
+# map_relay.py   — bridges slam_toolbox's root /map → /{ns}/map with
+#                  TRANSIENT_LOCAL so the global costmap never misses the map.
+#
+# tf_static_relay.py is RETIRED. The Pi bringup (robot_state_publisher) now
+# publishes directly to /{ns}/tf_static with TRANSIENT_LOCAL durability.
+# The script is kept in scripts/ for reference but is NOT installed or launched.
 install(
   PROGRAMS
     scripts/map_relay.py
     scripts/tf_relay.py
-    scripts/tf_static_relay.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

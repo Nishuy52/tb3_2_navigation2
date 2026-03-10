@@ -2,21 +2,28 @@
 """
 tf_relay.py
 
-Relays /tf to /{ns}/tf, forwarding dynamic transforms from the robot's
-hardware bringup (which publishes to root /tf) into the namespaced topic
-that Nav2 listens on.
+Relays /tf to /{ns}/tf for slam_toolbox's map→odom transform only.
+
+The Pi bringup (diff_drive_controller) now publishes its dynamic TFs
+(odom→base_footprint, etc.) DIRECTLY to /{ns}/tf — no relay is needed
+for hardware TFs.
+
+This relay exists solely to bridge slam_toolbox's map→odom transform.
+slam_toolbox publishes to the root /tf topic regardless of configuration.
+Nav2 (namespaced) listens on /{ns}/tf. This script bridges the gap.
 
 Why not topic_tools relay?
-  topic_tools relay uses VOLATILE QoS. While dynamic TFs are published
-  continuously (so missed messages recover quickly), the relay also has
-  no awareness of QoS mismatches between publisher and subscriber. This
-  script uses explicit QoS profiles matching what Nav2 expects.
+  topic_tools relay uses VOLATILE / VOLATILE QoS. The Pi bringup's
+  diff_drive_controller publishes dynamic TFs with BEST_EFFORT. This
+  script uses explicit QoS profiles to match both sides correctly:
+    - Sub:  VOLATILE / BEST_EFFORT  (matches slam_toolbox publisher)
+    - Pub:  VOLATILE / RELIABLE     (matches Nav2 subscriber expectation)
 
-Why NOT TRANSIENT_LOCAL here (unlike tf_static_relay.py)?
-  Dynamic transforms must NOT be buffered with TRANSIENT_LOCAL. A late-
-  joining subscriber receiving a stale dynamic TF (e.g. an old odom→base
+Why NOT TRANSIENT_LOCAL here (unlike map_relay.py)?
+  Dynamic transforms must never be buffered with TRANSIENT_LOCAL. A late-
+  joining subscriber receiving a stale dynamic TF (e.g. an old map→odom
   transform) would cause incorrect localisation. Dynamic TFs are published
-  at high frequency and subscribers catch up naturally within one cycle.
+  continuously and subscribers catch up naturally within one cycle.
 
 Usage: python3 tf_relay.py <target_topic>
   e.g. python3 tf_relay.py /tb3_1/tf
@@ -33,9 +40,8 @@ class TFRelay(Node):
     def __init__(self, target_topic: str):
         super().__init__('tf_relay')
 
-        # Dynamic TF uses VOLATILE / BEST_EFFORT on the publisher side
-        # (robot bringup) and VOLATILE / RELIABLE on the Nav2 subscriber side.
-        # We publish with RELIABLE so Nav2 nodes always receive every message.
+        # Subscribe BEST_EFFORT to match slam_toolbox's publisher QoS.
+        # Publish RELIABLE so Nav2 nodes always receive every message.
         volatile_sub_qos = QoSProfile(
             depth=100,
             durability=DurabilityPolicy.VOLATILE,
@@ -55,7 +61,8 @@ class TFRelay(Node):
         )
 
         self.get_logger().info(
-            f'tf_relay: /tf → {target_topic} (VOLATILE, not buffered)'
+            f'tf_relay: /tf → {target_topic} '
+            f'(slam_toolbox map→odom only; hardware TFs published directly by Pi)'
         )
 
     def callback(self, msg: TFMessage):

@@ -20,11 +20,12 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
+from launch_ros.actions import Node, SetRemap
 
 
 TURTLEBOT3_MODEL = os.environ['TURTLEBOT3_MODEL']
@@ -32,16 +33,6 @@ ROS_DISTRO = os.environ.get('ROS_DISTRO')
 
 
 def rewrite_nav2_params(params_path, ns, slam_active):
-    """
-    Rewrites nav2 params at launch time:
-      - Prefixes all frame IDs with the robot namespace
-      - When SLAM is active:
-          * Removes static_layer from global costmap plugins
-          * Points global costmap map_topic at slam_toolbox's live map
-      - amcl and map_server are left intact so Humble's lifecycle manager
-        starts cleanly. amcl's map→odom will be overridden by slam_toolbox's
-        transform which arrives later and takes precedence in the TF tree.
-    """
     with open(params_path, 'r') as f:
         params = yaml.safe_load(f)
 
@@ -50,13 +41,12 @@ def rewrite_nav2_params(params_path, ns, slam_active):
             return f'{ns}/{frame}'
         return frame
 
-    # --- Namespace all frame IDs ---
     top_level_frame_keys = {
-        'amcl':             ['base_frame_id', 'global_frame_id', 'odom_frame_id'],
-        'bt_navigator':     ['global_frame', 'robot_base_frame'],
-        'behavior_server':  ['local_frame', 'global_frame', 'robot_base_frame'],
-        'recoveries_server':['global_frame', 'robot_base_frame'],
-        'collision_monitor':['base_frame_id', 'odom_frame_id'],
+        'amcl':              ['base_frame_id', 'global_frame_id', 'odom_frame_id'],
+        'bt_navigator':      ['global_frame', 'robot_base_frame'],
+        'behavior_server':   ['local_frame', 'global_frame', 'robot_base_frame'],
+        'recoveries_server': ['global_frame', 'robot_base_frame'],
+        'collision_monitor': ['base_frame_id', 'odom_frame_id'],
     }
     for node_name, keys in top_level_frame_keys.items():
         if node_name not in params:
@@ -66,7 +56,6 @@ def rewrite_nav2_params(params_path, ns, slam_active):
             if k in p:
                 p[k] = ns_frame(p[k])
 
-    # Double-nested costmaps (Humble style)
     for costmap_key in ['local_costmap', 'global_costmap']:
         if costmap_key not in params:
             continue
@@ -77,10 +66,45 @@ def rewrite_nav2_params(params_path, ns, slam_active):
             if frame_key in inner:
                 inner[frame_key] = ns_frame(inner[frame_key])
 
+    # Rewrite observation source topics in all costmap layers.
+    # The scan source config is nested under each plugin key (obstacle_layer,
+    # voxel_layer, etc.), not directly under ros__parameters. We must walk
+    # into each plugin dict to find the observation source sub-dicts.
+    #
+    # YAML structure:
+    #   local_costmap:
+    #     local_costmap:
+    #       ros__parameters:
+    #         obstacle_layer:        ← plugin dict
+    #           observation_sources: scan
+    #           scan:                ← source dict (contains topic:)
+    #             topic: /scan       ← rewrite target
+    for costmap_key in ['local_costmap', 'global_costmap']:
+        if costmap_key not in params:
+            continue
+        ros_params = (params[costmap_key]
+                      .get(costmap_key, {})
+                      .get('ros__parameters', {}))
+        # Walk every value in ros__parameters looking for plugin dicts
+        # that contain an observation_sources key.
+        for plugin_dict in ros_params.values():
+            if not isinstance(plugin_dict, dict):
+                continue
+            if 'observation_sources' not in plugin_dict:
+                continue
+            for source_name in str(plugin_dict['observation_sources']).split():
+                source_cfg = plugin_dict.get(source_name)
+                if isinstance(source_cfg, dict):
+                    if source_cfg.get('topic') in ('/scan', 'scan'):
+                        source_cfg['topic'] = f'/{ns}/scan'
+
+    # Rewrite odom_topic in bt_navigator (hardcoded /odom in params).
+    if 'bt_navigator' in params:
+        p = params['bt_navigator'].get('ros__parameters', {})
+        if p.get('odom_topic') in ('/odom', 'odom'):
+            p['odom_topic'] = f'/{ns}/odom'
+
     if slam_active:
-        # Global costmap: drop static_layer so the old static map file is
-        # never displayed. The costmap uses slam_toolbox's live occupancy
-        # grid (relayed to /ns/map) and updates in real time.
         if 'global_costmap' in params:
             inner = (params['global_costmap']
                      .get('global_costmap', {})
@@ -98,12 +122,6 @@ def rewrite_nav2_params(params_path, ns, slam_active):
 
 
 def rewrite_slam_params(slam_params_path, ns):
-    """
-    Injects namespaced frame IDs and fully absolute topic paths into the
-    slam_toolbox params. slam_toolbox runs WITHOUT a ROS namespace on the
-    Node to avoid double-prefixing (e.g. /tb3_1/tb3_1/scan), so all
-    topic paths must be absolute /ns/topic strings.
-    """
     with open(slam_params_path, 'r') as f:
         params = yaml.safe_load(f)
 
@@ -131,114 +149,61 @@ def launch_setup(context, *args, **kwargs):
     params_f = context.launch_configurations['params_file']
     slam_pf  = context.launch_configurations['slam_params_file']
 
-    pkg_dir = get_package_share_directory('tb3_1_navigation2')
-
     nav2_launch_file_dir = os.path.join(
         get_package_share_directory('nav2_bringup'), 'launch'
     )
     rviz_config_dir = os.path.join(
-        pkg_dir, 'rviz', 'tb3_navigation2.rviz'
+        get_package_share_directory('tb3_1_navigation2'),
+        'rviz', 'tb3_navigation2.rviz'
     )
 
     rewritten_nav2_params = rewrite_nav2_params(params_f, ns, slam_val)
 
     # ------------------------------------------------------------------
-    # Relay nodes
+    # Nav2 bringup — wrapped in GroupAction with SetRemap
     #
-    # /tf:
-    #   The robot hardware stack publishes dynamic transforms to root /tf
-    #   with VOLATILE / BEST_EFFORT QoS. Nav2 (namespaced) listens on
-    #   /{ns}/tf. tf_relay.py bridges them with proper QoS matching — it
-    #   subscribes VOLATILE/BEST_EFFORT (matching the Pi bringup publisher)
-    #   and republishes VOLATILE/RELIABLE (matching Nav2's expectation).
+    # tf2_ros::Buffer inside composable nodes subscribes to /tf and
+    # /tf_static at the DDS layer, bypassing node-level remappings=.
+    # SetRemap inside a GroupAction is the only mechanism that propagates
+    # TF remappings into composable nodes loaded inside a container,
+    # because it operates at the launch graph level before any node
+    # initializes its subscriptions.
     #
-    #   NOTE: topic_tools relay was previously used here but is replaced by
-    #   tf_relay.py because topic_tools does not handle QoS profiles correctly,
-    #   leading to missed messages during the Nav2 startup window.
-    #
-    # /tf_static:
-    #   Same issue but worse — static TFs are TRANSIENT_LOCAL (latched).
-    #   topic_tools relay uses VOLATILE, causing Nav2 nodes that start after
-    #   the initial publish to never receive static TFs. tf_static_relay.py
-    #   accumulates all static transforms and republishes the complete set
-    #   with TRANSIENT_LOCAL so late-joining subscribers always get them.
-    #
-    # /map → /{ns}/map:
-    #   slam_toolbox publishes the live occupancy grid to root /map.
-    #   Nav2's global costmap subscribes to /{ns}/map. map_relay.py bridges
-    #   them with TRANSIENT_LOCAL depth=1 so the costmap never misses the
-    #   map even if it subscribes after the initial publish.
+    # /tf        -> /{ns}/tf        so Nav2 reads slam_toolbox map->odom
+    #                               and Pi odom->base_footprint from the
+    #                               namespaced topic (no cross-robot bleed)
+    # /tf_static -> /{ns}/tf_static so Nav2 reads robot_state_publisher's
+    #                               static transforms (base_link, base_scan)
     # ------------------------------------------------------------------
-    tf_relay = Node(
-        package='tb3_1_navigation2',
-        executable='tf_relay.py',
-        name='tf_relay',
-        output='screen',
-        arguments=[f'/{ns}/tf'],
-    )
+    nav2_group = GroupAction([
+        SetRemap('/tf',        f'/{ns}/tf'),
+        SetRemap('/tf_static', f'/{ns}/tf_static'),
 
-    tf_static_relay = Node(
-        package='tb3_1_navigation2',
-        executable='tf_static_relay.py',
-        name='tf_static_relay',
-        output='screen',
-        arguments=[f'/{ns}/tf_static'],
-    )
-
-    map_relay = Node(
-        package='tb3_1_navigation2',
-        executable='map_relay.py',
-        name='map_relay',
-        output='screen',
-        arguments=[f'/{ns}/map'],
-    )
-
-    # ------------------------------------------------------------------
-    # Nav2 bringup
-    #
-    # slam:=False — we launch slam_toolbox ourselves below.
-    # map:=map_yaml always — Humble's map_server requires a valid
-    # yaml_filename to configure successfully. The static map it loads is
-    # irrelevant during SLAM because static_layer is removed from the
-    # global costmap params above.
-    # ------------------------------------------------------------------
-    nav2_include = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            [nav2_launch_file_dir, '/bringup_launch.py']
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                [nav2_launch_file_dir, '/bringup_launch.py']
+            ),
+            launch_arguments={
+                'map':           map_yaml,
+                'use_sim_time':  use_sim,
+                'params_file':   rewritten_nav2_params,
+                'slam':          'False',
+                'namespace':     ns,
+                'use_namespace': 'True',
+            }.items(),
         ),
-        launch_arguments={
-            'map':           map_yaml,
-            'use_sim_time':  use_sim,
-            'params_file':   rewritten_nav2_params,
-            'slam':          'False',
-            'namespace':     ns,
-            'use_namespace': 'True',
-        }.items(),
-    )
-
-    actions = [tf_relay, tf_static_relay, map_relay, nav2_include]
+    ])
 
     # ------------------------------------------------------------------
-    # slam_toolbox — intentionally NOT namespaced on the Node.
+    # slam_toolbox — no Node namespace (avoids double-prefixing).
+    # All topics wired via explicit remappings:
+    #   /scan -> /{ns}/scan   (Pi lidar input)
+    #   /odom -> /{ns}/odom   (Pi odometry input)
+    #   /tf   -> /{ns}/tf     (map->odom output)
+    #   /map  -> /{ns}/map    (occupancy grid output)
     #
-    # When namespace='tb3_1' is set on the Node, ROS 2 prepends it to all
-    # relative topic subscriptions. Combined with the absolute paths in
-    # params (scan_topic: /tb3_1/scan), this resolves to /tb3_1/tb3_1/scan
-    # — a topic that doesn't exist — so slam_toolbox receives no scans.
-    #
-    # Without a namespace, absolute paths resolve correctly:
-    #   scan_topic:  /tb3_1/scan  → /tb3_1/scan  ✓
-    #   odom_topic:  /tb3_1/odom  → /tb3_1/odom  ✓
-    #   map_frame:   tb3_1/map                    ✓
-    #
-    # node_name is set to slam_toolbox_{ns} so that when multiple robots
-    # are eventually run simultaneously, their slam_toolbox service
-    # interfaces are distinguishable:
-    #   /slam_toolbox_tb3_1/save_map  (vs /slam_toolbox_tb3_1/save_map etc.)
-    #
-    # slam_toolbox publishes to root topics, bridged by the relays:
-    #   /map  → map_relay      → /{ns}/map   (global costmap live map source)
-    #   /tf   → tf_relay       → /{ns}/tf    (map→odom transform for nav2)
+    # NOTE: In Humble, slam_toolbox ignores scan_topic/odom_topic params
+    # for actual subscriptions. Node remappings are required.
     # ------------------------------------------------------------------
     if slam_val:
         rewritten_slam_params = rewrite_slam_params(slam_pf, ns)
@@ -246,12 +211,16 @@ def launch_setup(context, *args, **kwargs):
         slam_node = Node(
             package='slam_toolbox',
             executable='async_slam_toolbox_node',
-            name=f'slam_toolbox_{ns}',   # Distinguishable name for multi-robot
-            # No namespace — see explanation above
+            name=f'slam_toolbox_{ns}',
             parameters=[rewritten_slam_params],
+            remappings=[
+                ('/scan', f'/{ns}/scan'),
+                ('/odom', f'/{ns}/odom'),
+                ('/tf',   f'/{ns}/tf'),
+                ('/map',  f'/{ns}/map'),
+            ],
             output='screen',
         )
-        actions.append(slam_node)
 
     # ------------------------------------------------------------------
     # RViz2
@@ -269,8 +238,25 @@ def launch_setup(context, *args, **kwargs):
         ],
         output='screen',
     )
-    actions.append(rviz_node)
 
+    # tf_static_relay: fixes cross-machine TRANSIENT_LOCAL delivery failure.
+    # The Pi publishes /{ns}/tf_static with TRANSIENT_LOCAL, but Fast DDS
+    # does not reliably deliver cached messages to late-joining subscribers
+    # across machine boundaries. This relay subscribes VOLATILE (catching
+    # whatever arrives) and republishes locally with TRANSIENT_LOCAL so all
+    # local Nav2 nodes receive the full static TF tree regardless of startup order.
+    tf_static_relay = Node(
+        package='tb3_1_navigation2',
+        executable='tf_static_relay.py',
+        name='tf_static_relay',
+        output='screen',
+        arguments=[f'/{ns}/tf_static'],
+    )
+
+    actions = [tf_static_relay, nav2_group]
+    if slam_val:
+        actions.append(slam_node)
+    actions.append(rviz_node)
     return actions
 
 

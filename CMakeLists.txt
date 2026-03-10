@@ -17,8 +17,19 @@ find_package(ament_cmake REQUIRED)
 # Install
 ################################################################################
 install(
-  DIRECTORY launch map param rviz scripts
+  DIRECTORY launch map param rviz
   DESTINATION share/${PROJECT_NAME}
+)
+
+# Install Python scripts and mark them executable.
+# All three relay scripts must be installed here so the launch file can
+# reference them via package='tb3_1_navigation2', executable='<script>.py'
+install(
+  PROGRAMS
+    scripts/map_relay.py
+    scripts/tf_relay.py
+    scripts/tf_static_relay.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 ################################################################################

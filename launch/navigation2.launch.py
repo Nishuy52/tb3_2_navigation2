@@ -131,12 +131,13 @@ def launch_setup(context, *args, **kwargs):
     params_f = context.launch_configurations['params_file']
     slam_pf  = context.launch_configurations['slam_params_file']
 
+    pkg_dir = get_package_share_directory('tb3_1_navigation2')
+
     nav2_launch_file_dir = os.path.join(
         get_package_share_directory('nav2_bringup'), 'launch'
     )
     rviz_config_dir = os.path.join(
-        get_package_share_directory('tb3_1_navigation2'),
-        'rviz', 'tb3_navigation2.rviz'
+        pkg_dir, 'rviz', 'tb3_navigation2.rviz'
     )
 
     rewritten_nav2_params = rewrite_nav2_params(params_f, ns, slam_val)
@@ -144,43 +145,58 @@ def launch_setup(context, *args, **kwargs):
     # ------------------------------------------------------------------
     # Relay nodes
     #
-    # /tf and /tf_static:
-    #   The robot hardware stack and slam_toolbox publish TF to root /tf.
-    #   Nav2 (namespaced) listens on /tb3_1/tf. These relays bridge them.
+    # /tf:
+    #   The robot hardware stack publishes dynamic transforms to root /tf
+    #   with VOLATILE / BEST_EFFORT QoS. Nav2 (namespaced) listens on
+    #   /{ns}/tf. tf_relay.py bridges them with proper QoS matching — it
+    #   subscribes VOLATILE/BEST_EFFORT (matching the Pi bringup publisher)
+    #   and republishes VOLATILE/RELIABLE (matching Nav2's expectation).
     #
-    # /map → /ns/map:
-    #   slam_toolbox publishes the live occupancy grid to /map (root).
-    #   Nav2's global costmap subscribes to /tb3_1/map. map_relay bridges
-    #   them so the costmap updates in real time with the SLAM map.
+    #   NOTE: topic_tools relay was previously used here but is replaced by
+    #   tf_relay.py because topic_tools does not handle QoS profiles correctly,
+    #   leading to missed messages during the Nav2 startup window.
+    #
+    # /tf_static:
+    #   Same issue but worse — static TFs are TRANSIENT_LOCAL (latched).
+    #   topic_tools relay uses VOLATILE, causing Nav2 nodes that start after
+    #   the initial publish to never receive static TFs. tf_static_relay.py
+    #   accumulates all static transforms and republishes the complete set
+    #   with TRANSIENT_LOCAL so late-joining subscribers always get them.
+    #
+    # /map → /{ns}/map:
+    #   slam_toolbox publishes the live occupancy grid to root /map.
+    #   Nav2's global costmap subscribes to /{ns}/map. map_relay.py bridges
+    #   them with TRANSIENT_LOCAL depth=1 so the costmap never misses the
+    #   map even if it subscribes after the initial publish.
     # ------------------------------------------------------------------
     tf_relay = Node(
-        package='topic_tools',
-        executable='relay',
+        package='tb3_1_navigation2',
+        executable='tf_relay.py',
         name='tf_relay',
         output='screen',
-        arguments=['/tf', f'/{ns}/tf'],
+        arguments=[f'/{ns}/tf'],
     )
 
     tf_static_relay = Node(
-        package='topic_tools',
-        executable='relay',
+        package='tb3_1_navigation2',
+        executable='tf_static_relay.py',
         name='tf_static_relay',
         output='screen',
-        arguments=['/tf_static', f'/{ns}/tf_static'],
+        arguments=[f'/{ns}/tf_static'],
     )
 
     map_relay = Node(
-        package='topic_tools',
-        executable='relay',
+        package='tb3_1_navigation2',
+        executable='map_relay.py',
         name='map_relay',
         output='screen',
-        arguments=['/map', f'/{ns}/map'],
+        arguments=[f'/{ns}/map'],
     )
 
     # ------------------------------------------------------------------
     # Nav2 bringup
     #
-    # slam:=False — we launch slam_toolbox ourselves.
+    # slam:=False — we launch slam_toolbox ourselves below.
     # map:=map_yaml always — Humble's map_server requires a valid
     # yaml_filename to configure successfully. The static map it loads is
     # irrelevant during SLAM because static_layer is removed from the
@@ -215,9 +231,14 @@ def launch_setup(context, *args, **kwargs):
     #   odom_topic:  /tb3_1/odom  → /tb3_1/odom  ✓
     #   map_frame:   tb3_1/map                    ✓
     #
+    # node_name is set to slam_toolbox_{ns} so that when multiple robots
+    # are eventually run simultaneously, their slam_toolbox service
+    # interfaces are distinguishable:
+    #   /slam_toolbox_tb3_1/save_map  (vs /slam_toolbox_tb3_1/save_map etc.)
+    #
     # slam_toolbox publishes to root topics, bridged by the relays:
-    #   /map  → map_relay  → /tb3_1/map  (global costmap live map source)
-    #   /tf   → tf_relay   → /tb3_1/tf   (map→odom transform for nav2)
+    #   /map  → map_relay      → /{ns}/map   (global costmap live map source)
+    #   /tf   → tf_relay       → /{ns}/tf    (map→odom transform for nav2)
     # ------------------------------------------------------------------
     if slam_val:
         rewritten_slam_params = rewrite_slam_params(slam_pf, ns)
@@ -225,7 +246,7 @@ def launch_setup(context, *args, **kwargs):
         slam_node = Node(
             package='slam_toolbox',
             executable='async_slam_toolbox_node',
-            name='slam_toolbox',
+            name=f'slam_toolbox_{ns}',   # Distinguishable name for multi-robot
             # No namespace — see explanation above
             parameters=[rewritten_slam_params],
             output='screen',

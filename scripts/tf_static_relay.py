@@ -11,7 +11,7 @@ This node accumulates all static transforms and re-publishes the complete
 set with TRANSIENT_LOCAL so late-joining subscribers always get them.
 
 Usage: python3 tf_static_relay.py <target_topic>
-  e.g. python3 tf_static_relay.py /tb3_2/tf_static
+  e.g. python3 tf_static_relay.py /tb3_1/tf_static
 """
 
 import sys

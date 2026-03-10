@@ -101,7 +101,7 @@ def rewrite_slam_params(slam_params_path, ns):
     """
     Injects namespaced frame IDs and fully absolute topic paths into the
     slam_toolbox params. slam_toolbox runs WITHOUT a ROS namespace on the
-    Node to avoid double-prefixing (e.g. /tb3_2/tb3_2/scan), so all
+    Node to avoid double-prefixing (e.g. /tb3_1/tb3_1/scan), so all
     topic paths must be absolute /ns/topic strings.
     """
     with open(slam_params_path, 'r') as f:
@@ -135,7 +135,7 @@ def launch_setup(context, *args, **kwargs):
         get_package_share_directory('nav2_bringup'), 'launch'
     )
     rviz_config_dir = os.path.join(
-        get_package_share_directory('tb3_2_navigation2'),
+        get_package_share_directory('tb3_1_navigation2'),
         'rviz', 'tb3_navigation2.rviz'
     )
 
@@ -146,11 +146,11 @@ def launch_setup(context, *args, **kwargs):
     #
     # /tf and /tf_static:
     #   The robot hardware stack and slam_toolbox publish TF to root /tf.
-    #   Nav2 (namespaced) listens on /tb3_2/tf. These relays bridge them.
+    #   Nav2 (namespaced) listens on /tb3_1/tf. These relays bridge them.
     #
     # /map → /ns/map:
     #   slam_toolbox publishes the live occupancy grid to /map (root).
-    #   Nav2's global costmap subscribes to /tb3_2/map. map_relay bridges
+    #   Nav2's global costmap subscribes to /tb3_1/map. map_relay bridges
     #   them so the costmap updates in real time with the SLAM map.
     # ------------------------------------------------------------------
     tf_relay = Node(
@@ -205,19 +205,19 @@ def launch_setup(context, *args, **kwargs):
     # ------------------------------------------------------------------
     # slam_toolbox — intentionally NOT namespaced on the Node.
     #
-    # When namespace='tb3_2' is set on the Node, ROS 2 prepends it to all
+    # When namespace='tb3_1' is set on the Node, ROS 2 prepends it to all
     # relative topic subscriptions. Combined with the absolute paths in
-    # params (scan_topic: /tb3_2/scan), this resolves to /tb3_2/tb3_2/scan
+    # params (scan_topic: /tb3_1/scan), this resolves to /tb3_1/tb3_1/scan
     # — a topic that doesn't exist — so slam_toolbox receives no scans.
     #
     # Without a namespace, absolute paths resolve correctly:
-    #   scan_topic:  /tb3_2/scan  → /tb3_2/scan  ✓
-    #   odom_topic:  /tb3_2/odom  → /tb3_2/odom  ✓
-    #   map_frame:   tb3_2/map                    ✓
+    #   scan_topic:  /tb3_1/scan  → /tb3_1/scan  ✓
+    #   odom_topic:  /tb3_1/odom  → /tb3_1/odom  ✓
+    #   map_frame:   tb3_1/map                    ✓
     #
     # slam_toolbox publishes to root topics, bridged by the relays:
-    #   /map  → map_relay  → /tb3_2/map  (global costmap live map source)
-    #   /tf   → tf_relay   → /tb3_2/tf   (map→odom transform for nav2)
+    #   /map  → map_relay  → /tb3_1/map  (global costmap live map source)
+    #   /tf   → tf_relay   → /tb3_1/tf   (map→odom transform for nav2)
     # ------------------------------------------------------------------
     if slam_val:
         rewritten_slam_params = rewrite_slam_params(slam_pf, ns)
@@ -258,28 +258,28 @@ def generate_launch_description():
 
     if ROS_DISTRO == 'humble':
         default_params = os.path.join(
-            get_package_share_directory('tb3_2_navigation2'),
+            get_package_share_directory('tb3_1_navigation2'),
             'param', ROS_DISTRO, param_file_name
         )
     else:
         default_params = os.path.join(
-            get_package_share_directory('tb3_2_navigation2'),
+            get_package_share_directory('tb3_1_navigation2'),
             'param', param_file_name
         )
 
     default_map = os.path.join(
-        get_package_share_directory('tb3_2_navigation2'),
+        get_package_share_directory('tb3_1_navigation2'),
         'map', 'map.yaml'
     )
     default_slam_params = os.path.join(
-        get_package_share_directory('tb3_2_navigation2'),
+        get_package_share_directory('tb3_1_navigation2'),
         'param', 'slam_toolbox_params.yaml'
     )
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'namespace',
-            default_value='tb3_2',
+            default_value='tb3_1',
             description='Namespace for the robot'
         ),
         DeclareLaunchArgument(

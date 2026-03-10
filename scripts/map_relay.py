@@ -13,7 +13,7 @@ until the next publish cycle (every 5s). This relay stores the latest map and
 re-publishes it to every new subscriber immediately via TRANSIENT_LOCAL.
 
 Usage: python3 map_relay.py <target_topic>
-  e.g. python3 map_relay.py /tb3_2/map
+  e.g. python3 map_relay.py /tb3_1/map
 """
 
 import sys

@@ -242,10 +242,6 @@ def launch_setup(context, *args, **kwargs):
         namespace=ns,
         arguments=['-d', rviz_config_dir],
         parameters=[{'use_sim_time': use_sim == 'true'}],
-        remappings=[
-            ('/tf',        f'/{ns}/tf'),
-            ('/tf_static', f'/{ns}/tf_static'),
-        ],
         output='screen',
     )
     actions.append(rviz_node)

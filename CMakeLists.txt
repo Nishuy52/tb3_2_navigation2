@@ -21,6 +21,13 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/map_relay.py
+  scripts/tf_static_relay.py
+  scripts/tf_relay.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ################################################################################
 # Macro for ament package
 ################################################################################

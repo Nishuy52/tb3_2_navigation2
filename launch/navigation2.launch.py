@@ -57,6 +57,7 @@ def rewrite_nav2_params(params_path, ns, slam_active):
         'behavior_server':  ['local_frame', 'global_frame', 'robot_base_frame'],
         'recoveries_server':['global_frame', 'robot_base_frame'],
         'collision_monitor':['base_frame_id', 'odom_frame_id'],
+        'map_server':       ['frame_id'],
     }
     for node_name, keys in top_level_frame_keys.items():
         if node_name not in params:
@@ -77,17 +78,42 @@ def rewrite_nav2_params(params_path, ns, slam_active):
             if frame_key in inner:
                 inner[frame_key] = ns_frame(inner[frame_key])
 
+    # --- Namespace bt_navigator odom_topic ---
+    if 'bt_navigator' in params:
+        p = params['bt_navigator'].get('ros__parameters', {})
+        if 'odom_topic' in p:
+            p['odom_topic'] = f'/{ns}/odom'
+
+    # --- Namespace costmap observation-source topics ---
+    for costmap_key in ['local_costmap', 'global_costmap']:
+        if costmap_key not in params:
+            continue
+        inner = (params[costmap_key]
+                 .get(costmap_key, {})
+                 .get('ros__parameters', {}))
+        for layer_name in list(inner.keys()):
+            layer = inner[layer_name]
+            if isinstance(layer, dict) and 'topic' in layer:
+                if not layer['topic'].startswith(f'/{ns}/'):
+                    layer['topic'] = f'/{ns}/scan'
+
     if slam_active:
-        # Global costmap: drop static_layer so the old static map file is
-        # never displayed. The costmap uses slam_toolbox's live occupancy
-        # grid (relayed to /ns/map) and updates in real time.
-        if 'global_costmap' in params:
-            inner = (params['global_costmap']
-                     .get('global_costmap', {})
-                     .get('ros__parameters', {}))
-            plugins = inner.get('plugins', [])
-            inner['plugins'] = [p for p in plugins if p != 'static_layer']
-            inner['map_topic'] = f'/{ns}/map'
+        # In SLAM mode, keep static_layer so the planner has a full map.
+        # static_layer's default map_topic is 'map' (relative), which
+        # resolves to /{ns}/map in the robot namespace — exactly where
+        # map_relay forwards slam_toolbox's live occupancy grid.
+        # map_server publishes to map_static (not map), so there is no
+        # conflict with the static pre-saved map.
+        #
+        # Disable AMCL's TF broadcast to prevent it from publishing a
+        # competing map→odom transform that conflicts with slam_toolbox.
+        if 'amcl' in params:
+            p = params['amcl'].setdefault('ros__parameters', {})
+            p['tf_broadcast'] = False
+            # Point AMCL at a topic that is never published in SLAM mode so it
+            # never activates its scan callback. Without this AMCL subscribes
+            # to scan and map, wasting CPU and WiFi bandwidth.
+            p['map_topic'] = 'map_amcl_disabled'
 
     tmp = tempfile.NamedTemporaryFile(
         mode='w', suffix='.yaml', delete=False, prefix='nav2_params_rewritten_'
@@ -154,27 +180,27 @@ def launch_setup(context, *args, **kwargs):
     #   them so the costmap updates in real time with the SLAM map.
     # ------------------------------------------------------------------
     tf_relay = Node(
-        package='topic_tools',
-        executable='relay',
+        package='tb3_2_navigation2',
+        executable='tf_relay.py',
         name='tf_relay',
         output='screen',
-        arguments=['/tf', f'/{ns}/tf'],
+        arguments=[f'/{ns}/tf'],
     )
 
     tf_static_relay = Node(
-        package='topic_tools',
-        executable='relay',
+        package='tb3_2_navigation2',
+        executable='tf_static_relay.py',
         name='tf_static_relay',
         output='screen',
-        arguments=['/tf_static', f'/{ns}/tf_static'],
+        arguments=[f'/{ns}/tf_static'],
     )
 
     map_relay = Node(
-        package='topic_tools',
-        executable='relay',
+        package='tb3_2_navigation2',
+        executable='map_relay.py',
         name='map_relay',
         output='screen',
-        arguments=['/map', f'/{ns}/map'],
+        arguments=[f'/{ns}/map'],
     )
 
     # ------------------------------------------------------------------
@@ -233,18 +259,20 @@ def launch_setup(context, *args, **kwargs):
         actions.append(slam_node)
 
     # ------------------------------------------------------------------
-    # RViz2
+    # RViz2 — optional, off by default to reduce WiFi bandwidth
     # ------------------------------------------------------------------
-    rviz_node = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
-        namespace=ns,
-        arguments=['-d', rviz_config_dir],
-        parameters=[{'use_sim_time': use_sim == 'true'}],
-        output='screen',
-    )
-    actions.append(rviz_node)
+    rviz_val = context.launch_configurations['rviz'].lower() == 'true'
+    if rviz_val:
+        rviz_node = Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            namespace=ns,
+            arguments=['-d', rviz_config_dir],
+            parameters=[{'use_sim_time': use_sim == 'true'}],
+            output='screen',
+        )
+        actions.append(rviz_node)
 
     return actions
 
@@ -302,6 +330,11 @@ def generate_launch_description():
             'slam_params_file',
             default_value=default_slam_params,
             description='Full path to the slam_toolbox param file'
+        ),
+        DeclareLaunchArgument(
+            'rviz',
+            default_value='False',
+            description='Launch RViz2 (False by default to reduce WiFi bandwidth)'
         ),
 
         OpaqueFunction(function=launch_setup),

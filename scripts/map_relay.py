@@ -47,10 +47,12 @@ class MapRelay(Node):
         )
 
     def callback(self, msg: OccupancyGrid):
-        # Re-publish every map update. Because this publisher uses
-        # TRANSIENT_LOCAL with depth=1, any late-joining subscriber
-        # (e.g. global_costmap static_layer) will immediately receive
-        # the most recent map on connection.
+        # Refresh the stamp to now before re-publishing.
+        # The cached TRANSIENT_LOCAL message may carry a stale header.stamp
+        # from a previous session. Forwarding an old stamp causes the
+        # global_costmap's StaticLayer to request TF lookups at that old
+        # time, which may fall outside the TF buffer and stall activation.
+        msg.header.stamp = self.get_clock().now().to_msg()
         self.pub.publish(msg)
         self.get_logger().debug(
             f'map_relay: forwarded map {msg.info.width}x{msg.info.height} '

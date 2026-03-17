@@ -22,6 +22,7 @@ install(
 )
 
 install(PROGRAMS
+  scripts/auto_nav.py
   scripts/map_relay.py
   scripts/map_updates_relay.py
   scripts/tf_static_relay.py

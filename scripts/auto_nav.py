@@ -4,12 +4,14 @@ auto_nav.py
 
 Frontier-based autonomous exploration node for TurtleBot3.
 
-Subscribes to the SLAM-published occupancy grid, detects frontier cells
-(free cells adjacent to unknown space), clusters them, and sends
-NavigateToPose goals to Nav2 to systematically explore the environment.
+Phase 1 — Bootstrap: drives a small 3-leg open square (~0.5 m sides) via
+Nav2 NavigateToPose so that SLAM builds an initial map before exploration
+begins. Nav2 can navigate in SLAM mode even without a prior map because the
+global costmap uses a fixed 20×20 m grid populated only by the obstacle_layer.
 
-Exploration stops when the fraction of unknown cells drops below
-`unknown_threshold` (default 5%).
+Phase 2 — Explore: detects frontier cells (free cells adjacent to unknown
+space), clusters them, and sends NavigateToPose goals to Nav2 to explore.
+Stops when the fraction of unknown cells drops below `unknown_threshold`.
 
 Launch:
     ros2 launch tb3_2_navigation2 auto_nav.launch.py
@@ -21,6 +23,8 @@ Parameters:
 """
 
 import math
+import time
+from enum import Enum, auto
 
 import numpy as np
 import rclpy
@@ -35,13 +39,29 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from tf2_ros import Buffer, TransformListener
 
 # Frontier clustering parameters
-_CLUSTER_RADIUS_M = 0.5   # max distance to merge a cell into an existing cluster (metres)
-_MIN_CLUSTER_CELLS = 3    # discard clusters smaller than this (noise filter)
+_CLUSTER_RADIUS_M  = 0.5   # max distance to merge a cell into an existing cluster (metres)
+_MIN_CLUSTER_CELLS = 3     # discard clusters smaller than this (noise filter)
 
 # Stuck / blacklist parameters
-_STUCK_GOAL_DIST_M = 0.30  # same-goal detection radius (metres)
-_STUCK_THRESHOLD = 3       # consecutive same-frontier or abort hits before blacklisting
-_BLACKLIST_RADIUS_M = 0.5  # radius around a blacklisted point to suppress (metres)
+_STUCK_GOAL_DIST_M   = 0.30  # same-goal detection radius (metres)
+_ABORT_THRESHOLD     = 1     # aborts before blacklisting (1 = immediate on first abort)
+_SAME_GOAL_THRESHOLD = 2     # consecutive same-goal re-selections before blacklisting
+_BLACKLIST_RADIUS_M  = 0.5   # radius around a blacklisted point to suppress (metres)
+
+# Minimum distance the robot must travel to the goal to guarantee a SLAM map update.
+# Must be comfortably above slam_toolbox's minimum_travel_distance (0.1 m).
+_MIN_GOAL_DIST_M = 0.5
+
+# Post-success map-settle delay
+_MAP_SETTLE_S = 3.0  # seconds to wait after reaching a frontier before re-planning
+
+# Bootstrap square side length
+_BOOTSTRAP_SIDE_M = 0.5
+
+
+class _Phase(Enum):
+    BOOTSTRAP = auto()
+    EXPLORE   = auto()
 
 
 class FrontierExplorer(Node):
@@ -96,8 +116,21 @@ class FrontierExplorer(Node):
         self._current_map: OccupancyGrid | None = None
         self._navigating  = False
         self._last_goal: tuple[float, float] | None = None
-        self._stuck_count = 0
+
+        # Bootstrap phase
+        self._phase = _Phase.BOOTSTRAP
+        self._bootstrap_legs: list[tuple[float, float]] = []
+        self._bootstrap_idx   = 0
+
+        # Post-success settle
+        self._map_settle_until = 0.0
+
+        # Stuck tracking — two separate counters
+        self._abort_count     = 0   # consecutive aborted goals
+        self._same_goal_count = 0   # consecutive same-goal re-selections
+
         self._blacklist: list[tuple[float, float]] = []
+        self._current_goal_handle = None
 
         # ── Exploration timer (fires every 0.5 s) ────────────────────────────
         self._explore_timer = self.create_timer(0.5, self._explore_once)
@@ -106,7 +139,7 @@ class FrontierExplorer(Node):
 
     def _map_callback(self, msg: OccupancyGrid):
         self._current_map = msg
-        if self._check_stop_condition(msg):
+        if self._phase == _Phase.EXPLORE and self._check_stop_condition(msg):
             self._explore_timer.cancel()
 
     # ── Stop condition ───────────────────────────────────────────────────────
@@ -138,6 +171,50 @@ class FrontierExplorer(Node):
                 tf2_ros.ExtrapolationException) as e:
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5.0)
             return None
+
+    # ── Bootstrap phase ──────────────────────────────────────────────────────
+
+    def _run_bootstrap(self):
+        """Drive a 3-leg open square to give SLAM an initial map."""
+        if self._navigating:
+            return
+
+        # If a map is already available, skip bootstrap entirely
+        if self._current_map is not None:
+            self.get_logger().info('Map already available. Skipping bootstrap.')
+            if self._navigating and self._current_goal_handle is not None:
+                self._current_goal_handle.cancel_goal_async()
+                self._navigating = False
+            self._phase = _Phase.EXPLORE
+            return
+
+        # Compute waypoints on the first successful TF lookup
+        if not self._bootstrap_legs:
+            pose = self._get_robot_pose()
+            if pose is None:
+                return  # TF not ready yet, retry next timer tick
+            rx0, ry0 = pose
+            s = _BOOTSTRAP_SIDE_M
+            self._bootstrap_legs = [
+                (rx0 + s, ry0),      # forward
+                (rx0 + s, ry0 - s),  # right
+                (rx0,     ry0 - s),  # back-left (open square, no return leg)
+            ]
+            self.get_logger().info(
+                f'Bootstrap: driving 3-leg square from ({rx0:.2f}, {ry0:.2f})'
+            )
+
+        if self._bootstrap_idx >= len(self._bootstrap_legs):
+            self.get_logger().info('Bootstrap complete. Starting frontier exploration.')
+            self._phase = _Phase.EXPLORE
+            return
+
+        leg = self._bootstrap_legs[self._bootstrap_idx]
+        self.get_logger().info(
+            f'Bootstrap leg {self._bootstrap_idx + 1}/{len(self._bootstrap_legs)}: '
+            f'({leg[0]:.2f}, {leg[1]:.2f})'
+        )
+        self._send_goal(*leg)
 
     # ── Frontier detection ───────────────────────────────────────────────────
 
@@ -171,33 +248,32 @@ class FrontierExplorer(Node):
             return []
 
         # ── Greedy distance-based clustering ─────────────────────────────────
-        # Work in grid-cell units; convert radius to cells
-        radius_cells = _CLUSTER_RADIUS_M / info.resolution
+        radius_cells    = _CLUSTER_RADIUS_M / info.resolution
         radius_cells_sq = radius_cells ** 2
 
         clusters: list[list[np.ndarray]] = []
-        cluster_means: list[np.ndarray] = []  # running mean (row, col)
+        cluster_means: list[np.ndarray]  = []
 
         for pt in indices:
-            best_idx = -1
+            best_idx     = -1
             best_dist_sq = radius_cells_sq + 1
             for i, mean in enumerate(cluster_means):
                 d2 = float(np.sum((pt - mean) ** 2))
                 if d2 < best_dist_sq:
                     best_dist_sq = d2
-                    best_idx = i
+                    best_idx     = i
             if best_idx >= 0:
                 clusters[best_idx].append(pt)
                 n = len(clusters[best_idx])
-                cluster_means[best_idx] = cluster_means[best_idx] + (pt - cluster_means[best_idx]) / n
+                cluster_means[best_idx] += (pt - cluster_means[best_idx]) / n
             else:
                 clusters.append([pt])
                 cluster_means.append(pt.astype(float))
 
         # ── Convert surviving clusters to world coordinates ───────────────────
         centroids: list[tuple[float, float]] = []
-        ox = info.origin.position.x
-        oy = info.origin.position.y
+        ox  = info.origin.position.x
+        oy  = info.origin.position.y
         res = info.resolution
 
         for cluster, mean in zip(clusters, cluster_means):
@@ -218,22 +294,38 @@ class FrontierExplorer(Node):
         rx: float,
         ry: float,
     ) -> tuple[float, float] | None:
-        """Return the nearest centroid that is not blacklisted."""
-        best = None
+        """Return the nearest non-blacklisted centroid that is at least
+        _MIN_GOAL_DIST_M from the robot after the inward shift, ensuring
+        every goal movement is large enough to trigger a SLAM map update."""
+        best_goal = None
         best_dist = float('inf')
+
         for cx, cy in centroids:
-            # Check blacklist
-            blacklisted = any(
+            if any(
                 math.hypot(cx - bx, cy - by) < _BLACKLIST_RADIUS_M
                 for bx, by in self._blacklist
-            )
-            if blacklisted:
+            ):
                 continue
-            d = math.hypot(cx - rx, cy - ry)
-            if d < best_dist:
-                best_dist = d
-                best = (cx, cy)
-        return best
+
+            # Shift centroid 0.3 m toward robot so goal lands in clear free space
+            dx, dy = rx - cx, ry - cy
+            dist   = math.hypot(dx, dy)
+            if dist > 0.3:
+                gx = cx + 0.3 * (dx / dist)
+                gy = cy + 0.3 * (dy / dist)
+            else:
+                gx, gy = cx, cy
+
+            # Skip if the shifted goal is too close to trigger a map update
+            goal_dist = math.hypot(gx - rx, gy - ry)
+            if goal_dist < _MIN_GOAL_DIST_M:
+                continue
+
+            if goal_dist < best_dist:
+                best_dist = goal_dist
+                best_goal = (gx, gy)
+
+        return best_goal
 
     # ── Goal sending ─────────────────────────────────────────────────────────
 
@@ -252,7 +344,7 @@ class FrontierExplorer(Node):
         pose.pose.position.z = 0.0
         pose.pose.orientation.w = 1.0  # identity — planner handles heading
 
-        goal = NavigateToPose.Goal(pose=pose)
+        goal   = NavigateToPose.Goal(pose=pose)
         future = self._nav_client.send_goal_async(
             goal, feedback_callback=self._feedback_callback
         )
@@ -267,29 +359,47 @@ class FrontierExplorer(Node):
         if not goal_handle.accepted:
             self.get_logger().warn('Goal rejected by Nav2.')
             self._navigating = False
-            self._stuck_count += 1
+            if self._phase == _Phase.BOOTSTRAP:
+                self._bootstrap_idx += 1  # skip rejected bootstrap leg
+            else:
+                self._abort_count += 1
             return
+        self._current_goal_handle = goal_handle
         self.get_logger().info('Goal accepted.')
         goal_handle.get_result_async().add_done_callback(self._result_callback)
 
     def _result_callback(self, future):
         status = future.result().status
-        # GoalStatus values: SUCCEEDED=4, CANCELED=5, ABORTED=6
+        # GoalStatus: SUCCEEDED=4, CANCELED=5, ABORTED=6
+
+        # ── Bootstrap phase ──────────────────────────────────────────────────
+        if self._phase == _Phase.BOOTSTRAP:
+            if status in (4, 5, 6):
+                self._bootstrap_idx += 1  # advance regardless of outcome
+            self._navigating = False
+            return
+
+        # ── Explore phase ────────────────────────────────────────────────────
         if status == 4:
             self.get_logger().info('Reached frontier.')
-            self._stuck_count = 0
-            self._blacklist.clear()
+            self._abort_count      = 0
+            # Do NOT clear blacklist here — let it persist to avoid re-visiting
+            # problematic frontiers. Blacklist is cleared only when all frontiers
+            # are blacklisted (handled in _explore_once).
+            self._map_settle_until = time.monotonic() + _MAP_SETTLE_S
         elif status == 5:
             self.get_logger().info('Goal canceled.')
         else:
             self.get_logger().warn(f'Navigation aborted (status={status}).')
-            self._stuck_count += 1
-            if self._stuck_count >= _STUCK_THRESHOLD and self._last_goal is not None:
+            self._abort_count += 1
+            if self._abort_count >= _ABORT_THRESHOLD and self._last_goal is not None:
                 self.get_logger().warn(
-                    f'Blacklisting frontier at {self._last_goal}.'
+                    f'Blacklisting frontier at {self._last_goal} after '
+                    f'{_ABORT_THRESHOLD} aborts.'
                 )
                 self._blacklist.append(self._last_goal)
-                self._stuck_count = 0
+                self._abort_count = 0
+
         self._navigating = False
 
     def _feedback_callback(self, feedback_msg):
@@ -299,7 +409,17 @@ class FrontierExplorer(Node):
     # ── Main exploration loop ─────────────────────────────────────────────────
 
     def _explore_once(self):
+        # ── Bootstrap phase ──────────────────────────────────────────────────
+        if self._phase == _Phase.BOOTSTRAP:
+            self._run_bootstrap()
+            return
+
+        # ── Explore phase ────────────────────────────────────────────────────
         if self._navigating:
+            return
+
+        # Wait for SLAM to incorporate new scans after reaching a frontier
+        if time.monotonic() < self._map_settle_until:
             return
 
         if self._current_map is None:
@@ -324,27 +444,28 @@ class FrontierExplorer(Node):
 
         best = self._select_best_frontier(centroids, *robot_pose)
         if best is None:
-            self.get_logger().warn(
-                'All frontiers are blacklisted. Clearing blacklist and retrying.'
+            self.get_logger().info(
+                'All reachable frontiers exhausted. Exploration complete. Stopping.'
             )
-            self._blacklist.clear()
+            self._explore_timer.cancel()
             return
 
-        # Stuck detection: same frontier selected repeatedly
+        # Stuck detection: same frontier re-selected consecutively
         if self._last_goal is not None:
             if math.hypot(best[0] - self._last_goal[0],
                           best[1] - self._last_goal[1]) < _STUCK_GOAL_DIST_M:
-                self._stuck_count += 1
-                if self._stuck_count >= _STUCK_THRESHOLD:
+                self._same_goal_count += 1
+                if self._same_goal_count >= _SAME_GOAL_THRESHOLD:
                     self.get_logger().warn(
-                        f'Same frontier selected {_STUCK_THRESHOLD} times. '
+                        f'Same frontier re-selected {self._same_goal_count} times. '
                         f'Blacklisting {best}.'
                     )
                     self._blacklist.append(best)
-                    self._stuck_count = 0
+                    self._same_goal_count = 0
                     return
             else:
-                self._stuck_count = 0
+                self._same_goal_count = 0
+                self._abort_count = 0  # new frontier selected, reset abort counter
 
         self._send_goal(*best)
 

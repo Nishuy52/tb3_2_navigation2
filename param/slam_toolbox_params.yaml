@@ -29,8 +29,8 @@ slam_toolbox:
     stack_size_to_use: 40000000
 
     # Correlation params
-    minimum_travel_distance: 0.2
-    minimum_travel_heading: 0.3
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.15
     scan_buffer_size: 100
     scan_buffer_maximum_scan_distance: 10.0
     link_match_minimum_response_fine: 0.1
